@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Local Soundboard</title>
+  <meta name="description" content="Static soundboard powered by index.json" />
+  <style>
+    :root {
+      --bg: #0f1115;
+      --card: #151925;
+      --text: #e7ecf3;
+      --muted: #a9b3c1;
+      --accent: #6ea8fe;
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+      background: var(--bg);
+      color: var(--text);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    header, footer {
+      padding: 12px 16px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0));
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    header h1 {
+      margin: 0; font-size: 18px; letter-spacing: 0.3px;
+    }
+    .controls {
+      display: flex; gap: 12px; align-items: center; margin-top: 8px; color: var(--muted);
+    }
+    .controls input[type="range"] { width: 180px; }
+
+    #grid {
+      padding: 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 18px;
+      align-content: start;
+    }
+
+    .pad {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      gap: 10px;
+    }
+
+    /* Squirkle button */
+    .btn {
+      position: relative;
+      display: inline-grid;
+      place-items: center;
+      min-height: 120px;
+      padding: 16px;
+      color: #0b0d12;
+      background: #9ad0ff;
+      border: none;
+      cursor: pointer;
+      user-select: none;
+      border-radius: 24% / 36%;
+      box-shadow:
+        0 10px 18px rgba(0,0,0,0.25),
+        inset 0 -8px 16px rgba(0,0,0,0.12),
+        inset 0 8px 16px rgba(255,255,255,0.08);
+      transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+      outline: none;
+    }
+    .btn:hover { filter: brightness(1.02); }
+    .btn:focus-visible {
+      box-shadow:
+        0 0 0 3px rgba(110,168,254,0.8),
+        0 10px 18px rgba(0,0,0,0.25),
+        inset 0 -8px 16px rgba(0,0,0,0.12),
+        inset 0 8px 16px rgba(255,255,255,0.08);
+    }
+    .btn.playing {
+      transform: translateY(2px) scale(0.98);
+      box-shadow:
+        0 4px 12px rgba(0,0,0,0.25),
+        inset 0 6px 14px rgba(0,0,0,0.14),
+        inset 0 -6px 12px rgba(255,255,255,0.04);
+    }
+
+    .label {
+      font-size: 14px;
+      text-align: center;
+      color: var(--text);
+      opacity: 0.9;
+      text-wrap: balance;
+    }
+    .hint {
+      position: absolute;
+      right: 10px; top: 10px;
+      font-size: 12px;
+      color: rgba(0,0,0,0.6);
+      background: rgba(255,255,255,0.65);
+      padding: 2px 6px;
+      border-radius: 999px;
+    }
+    .empty, .error {
+      color: var(--muted);
+      padding: 24px;
+      text-align: center;
+    }
+    .toolbar-btn {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,0.08);
+      padding: 6px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    .toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Local Soundboard</h1>
+    <div class="controls">
+      <button id="stopAll" class="toolbar-btn" aria-label="Stop all sounds">Stop all</button>
+      <label for="volume">Volume</label>
+      <input id="volume" type="range" min="0" max="1" step="0.01" value="1" />
+      <span id="status" aria-live="polite"></span>
+    </div>
+  </header>
+
+  <main id="grid" role="list" aria-label="Sound pads"></main>
+
+  <footer>
+    <small>Powered by <code>index.json</code>. Host on GitHub Pages; edit JSON to add pads.</small>
+  </footer>
+
+  <script>
+    // Config
+    const JSON_PATH = 'index.json';       // Keep index.json next to index.html
+    const DEFAULT_COLOR = '#9ad0ff';      // Fallback pad color
+    const ALLOW_OVERLAP = false;          // Play multiple instances of the same pad at once?
+
+    const grid = document.getElementById('grid');
+    const stopAllBtn = document.getElementById('stopAll');
+    const volumeSlider = document.getElementById('volume');
+    const statusEl = document.getElementById('status');
+
+    const pads = []; // { title, audio, button, key }
+
+    const fmt = (n) => n.toLocaleString();
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    // Stop everything
+    function stopAll() {
+      for (const p of pads) {
+        if (!p.audio) continue;
+        try {
+          p.audio.pause();
+          p.audio.currentTime = 0;
+          p.button.classList.remove('playing');
+        } catch {}
+      }
+    }
+    stopAllBtn.addEventListener('click', stopAll);
+
+    // Global volume
+    volumeSlider.addEventListener('input', () => {
+      for (const p of pads) if (p.audio) p.audio.volume = Number(volumeSlider.value);
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.repeat) return;
+      const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+      const pad = pads.find(p => (p.key || '').toUpperCase() === key);
+      if (pad) {
+        e.preventDefault();
+        pad.button.click();
+      }
+    });
+
+    function createPad(entry, idx) {
+      const title = String(entry.title || `Sound ${idx+1}`);
+      const src   = String(entry.src || '').trim();
+      const color = String(entry.color || DEFAULT_COLOR);
+      const key   = entry.key ? String(entry.key) : '';
+
+      if (!src) return null;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'pad';
+      wrap.setAttribute('role', 'listitem');
+
+      const btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.style.background = color;
+      btn.setAttribute('aria-label', `Play ${title}`);
+      btn.dataset.src = src;
+
+      if (key) {
+        const k = document.createElement('span');
+        k.className = 'hint';
+        k.textContent = key.toUpperCase();
+        btn.appendChild(k);
+      }
+
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = title;
+
+      wrap.appendChild(btn);
+      wrap.appendChild(label);
+      grid.appendChild(wrap);
+
+      // One audio element per pad (simple & memory-friendly)
+      const audio = new Audio(src);
+      audio.preload = 'metadata';
+      audio.volume = Number(volumeSlider.value);
+
+      // Tie button interactions
+      btn.addEventListener('click', async () => {
+        try {
+          if (ALLOW_OVERLAP) {
+            const a = new Audio(src);
+            a.volume = Number(volumeSlider.value);
+            btn.classList.add('playing');
+            a.addEventListener('ended', () => btn.classList.remove('playing'));
+            await a.play();
+          } else {
+            if (!audio.paused) {
+              audio.pause();
+              audio.currentTime = 0;
+              btn.classList.remove('playing');
+              return;
+            }
+            audio.currentTime = 0;
+            btn.classList.add('playing');
+            await audio.play();
+          }
+        } catch (err) {
+          console.error('Playback error:', err);
+          setStatus('Playback blocked—click once to unlock audio.');
+        }
+      });
+
+      audio.addEventListener('ended', () => btn.classList.remove('playing'));
+      audio.addEventListener('pause', () => btn.classList.remove('playing'));
+
+      const padObj = { title, audio, button: btn, key };
+      pads.push(padObj);
+      return padObj;
+    }
+
+    async function boot() {
+      setStatus('Loading…');
+      try {
+        const res = await fetch(JSON_PATH, { cache: 'no-cache' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const items = await res.json();
+        if (!Array.isArray(items) || items.length === 0) {
+          grid.innerHTML = '<div class="empty">Your <code>index.json</code> is empty.</div>';
+          setStatus('');
+          return;
+        }
+        let okCount = 0;
+        for (let i = 0; i < items.length; i++) {
+          const p = createPad(items[i], i);
+          if (p) okCount++;
+        }
+        setStatus(`Loaded ${fmt(okCount)} sound${okCount===1?'':'s'}.`);
+      } catch (e) {
+        console.error(e);
+        grid.innerHTML = '<div class="error">Failed to load <code>index.json</code>. If you are opening the file directly, run a local server: <code>python -m http.server</code></div>';
+        setStatus('');
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>
